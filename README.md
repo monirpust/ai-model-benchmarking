@@ -22,7 +22,7 @@ It ships with two research use cases: **question generation** from course conten
 ## Quick start
 
 ```bash
-git clone <this repo> genbench && cd genbench
+git clone https://github.com/monirpust/ai-model-benchmarking.git && cd ai-model-benchmarking
 npm install
 npm start                    # http://localhost:3000
 ```
