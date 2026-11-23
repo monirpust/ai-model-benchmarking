@@ -1,0 +1,245 @@
+# GenBench use case 1: Question generation from course content (OBE-aligned)
+# Every section below maps to a layer of the Generalized Benchmarking Framework v2.
+
+benchmark:                     # Layer 0: benchmark spec
+  id: question-generation
+  name: Question generation from course content
+  version: 1.0.0
+  decision: >-
+    Which model configuration should our department use to draft Bloom-aligned
+    assessment questions from engineering course content, before teacher review?
+  audience: Course teachers and the program assessment committee
+  owner: MSIB Research Group
+
+task:
+  description: >-
+    Given a passage of undergraduate computer science course content (text, optionally with a
+    diagram image or a short lecture audio clip), generate 3 to 5 assessment questions with
+    model answers. Each question must be answerable from the content, clearly worded, labelled
+    with a Bloom's taxonomy level, and pitched at the course year. Output English JSON.
+
+inputs:                        # Layer 1: reference inputs (dynamic, typed fields)
+  fields:
+    - { name: content, type: text, description: Course content passage }
+    - { name: diagram, type: image, optional: true, description: Figure from the slides }
+    - { name: lecture_audio, type: audio, optional: true, description: Short lecture clip }
+  dataset: data/items.jsonl
+  strata: [subject, level]
+  min_per_stratum: 2
+  split: { by: source, test_fraction: 0.75, seed: 7 }
+
+output:                        # Layer 3: fixed output structure
+  instructions: Return only a JSON object with a "questions" array.
+  schema:
+    type: object
+    required: [questions]
+    properties:
+      questions:
+        type: array
+        minItems: 3
+        maxItems: 5
+        items:
+          type: object
+          required: [question, answer, bloom_level]
+          properties:
+            question: { type: string, minLength: 10 }
+            answer: { type: string, minLength: 3 }
+            bloom_level: { type: string, enum: [remember, understand, apply, analyze, evaluate, create] }
+            difficulty: { type: string, enum: [easy, medium, hard] }
+
+space:                         # Layer 2: configuration space (Cartesian product of factors)
+  factors:
+    model:
+      description: Provider and model. "supports" lists readable input modalities.
+      levels:
+        - { id: "mock:strong", supports: [text, image, audio], tier: frontier, description: offline simulated strong model }
+        - { id: "mock:medium", supports: [text, image, audio], tier: mid, description: offline simulated mid model }
+        - { id: "mock:weak", supports: [text, image, audio], tier: small, description: offline simulated small model }
+        - { id: "openai:gpt-4o-mini", supports: [text, image], tier: small }
+        - { id: "openai:gpt-4.1", supports: [text, image], tier: frontier }
+        - { id: "anthropic:claude-sonnet-4-5", supports: [text, image], tier: frontier }
+        - { id: "anthropic:claude-haiku-4-5", supports: [text, image], tier: small }
+        - { id: "gemini:gemini-2.5-flash", supports: [text, image, audio], tier: small }
+        - { id: "gemini:gemini-2.5-pro", supports: [text, image, audio], tier: frontier }
+        - { id: "compat:llama3.1", supports: [text], tier: small, description: local model via Ollama }
+    prompt:
+      description: Prompt template id (see prompts below)
+      levels:
+        - { id: zero_shot, description: bare instruction }
+        - { id: few_shot, description: two worked examples of questions with bloom levels }
+        - { id: cot, description: plan key concepts then write questions }
+        - { id: bloom_scaffold, description: explicit bloom taxonomy definitions and verbs, recommended for bloom aligned questions }
+        - { id: rubric_guided, description: shows the evaluation rubric to the generator }
+    temperature: { levels: [0, 0.3, 0.7, 1.0], description: sampling temperature }
+    persona:
+      levels:
+        - { id: teacher, text: "You are an experienced university course teacher writing assessment questions." }
+        - { id: examiner, text: "You are an external examiner writing rigorous exam questions." }
+        - { id: tutor, text: "You are a friendly tutor writing practice questions." }
+        - { id: none, text: "" }
+    bloom_strategy:
+      levels:
+        - { id: follow_reference, description: target the bloom levels suited to the course year, recommended }
+        - { id: balanced, description: spread across all six levels }
+        - { id: higher_order, description: favour analyze evaluate create }
+    context_chunking: { levels: [full, summary_first, per_paragraph] }
+    language:
+      levels:
+        - { id: english, description: output in English }
+        - { id: bangla, description: output in Bangla }
+    max_tokens: { levels: [512, 1024, 2048] }
+    reasoning: { levels: [off, brief] }
+    example_source: { levels: [none, same_subject, cross_subject] }
+    difficulty_target:
+      levels:
+        - { id: easy }
+        - { id: mixed, recommended: true, description: matched to course year }
+        - { id: hard }
+    input_mode:
+      description: multimodal sends images/audio to the model; text_only drops them
+      levels: [multimodal, text_only]
+  constraints:
+    - { if: { model: "compat:*" }, then_not: { input_mode: multimodal } }
+  prefilter:                   # LLM agent prunes ~1.5 million combinations to a small set
+    enabled: true
+    provider: mock             # set to openai / anthropic / gemini to use a real planner LLM
+    model: planner
+    target_size: 10
+    require_available_providers: true   # drop models whose API key is not configured
+    guidance: >-
+      English output only. Prefer prompts that explain Bloom levels. Keep temperature low to
+      moderate. Keep at least one small, cheap model as a baseline.
+
+prompts:
+  system: "{{factors.persona}}"
+  zero_shot: |
+    Write 3 to 5 assessment questions with answers about the following course content.
+    CONTENT:
+    {{content}}
+    {{output_instructions}}
+    Schema:
+    {{output_schema}}
+  few_shot: |
+    Write 3 to 5 assessment questions with model answers about the course content below.
+    Example: {"question": "Why does inserting into the middle of an array take linear time?", "answer": "Later elements must shift.", "bloom_level": "understand", "difficulty": "easy"}
+    Example: {"question": "Compare round-robin and shortest-job-first for interactive workloads.", "answer": "Round-robin gives better response time; SJF minimises average wait but needs burst lengths.", "bloom_level": "analyze", "difficulty": "medium"}
+    Course year: {{strata.level}}. Difficulty target: {{factors.difficulty_target}}.
+    CONTENT:
+    {{content}}
+    {{output_instructions}}
+    Schema:
+    {{output_schema}}
+  cot: |
+    First identify the 3-5 key concepts in the content, then write one question per concept
+    with a model answer and a Bloom level. Output only the final JSON.
+    CONTENT:
+    {{content}}
+    Schema:
+    {{output_schema}}
+  bloom_scaffold: |
+    Bloom levels: remember (recall facts), understand (explain), apply (use in a new case),
+    analyze (break down, compare), evaluate (judge, justify), create (design something new).
+    Strategy: {{factors.bloom_strategy}}. Course year: {{strata.level}}.
+    Write 3 to 5 questions answerable ONLY from this content, each with a model answer and
+    the Bloom level it targets.
+    CONTENT:
+    {{content}}
+    {{output_instructions}}
+    Schema:
+    {{output_schema}}
+  rubric_guided: |
+    Your questions will be judged on relevance to the content, clarity, answerability,
+    Bloom alignment and difficulty for the course year ({{strata.level}}).
+    Write 3 to 5 questions with model answers.
+    CONTENT:
+    {{content}}
+    Schema:
+    {{output_schema}}
+
+run:
+  repeats: 2
+  seed: 42
+  max_concurrency: 6
+  retry_invalid: 1
+
+metrics:                       # Lane 4a: automatic metrics (program, 100% of items)
+  - { id: schema_valid, type: schema_valid }
+  - { id: question_count, type: count, path: questions, min: 3, max: 5 }
+  - { id: bloom_target_match, type: field_match, path: "questions[].bloom_level", reference: target_bloom }
+  - { id: grounding, type: grounding, path: "questions[].question", against: [content] }
+  - { id: distinctness, type: distinct_ratio, path: "questions[].question", threshold: 0.8 }
+  - { id: well_formed, type: regex, path: "questions[].question", pattern: "\\?$" }
+
+rubric:                        # Lanes 4b and 4c: anchored rubric used by the LLM judge and humans
+  criteria:
+    - id: relevance
+      description: Questions address the key ideas of the given content, not generic or outside material.
+      scale: [1, 5]
+      anchors:
+        1: Generic questions that could be asked about any topic.
+        3: Related to the topic but miss the passage's main ideas.
+        5: { description: Each question targets a central idea stated in the passage, example: "Why do sorted insertions make a BST degenerate?" }
+    - id: clarity
+      description: Each question is unambiguous, grammatical and asks one thing.
+      scale: [1, 5]
+      anchors:
+        1: Confusing or several questions bundled together.
+        3: Understandable but vague wording or double-barrelled.
+        5: Precise, single-focus, exam-ready wording.
+    - id: answerability
+      description: Questions can be answered from the content and the model answers are correct.
+      scale: [1, 5]
+      anchors:
+        1: Requires outside knowledge or the given answers are wrong.
+        3: Mostly answerable; at least one answer is incomplete.
+        5: All answerable from the passage with correct, complete answers.
+    - id: bloom_alignment
+      description: The stated Bloom level matches the cognitive demand of each question.
+      scale: [1, 5]
+      anchors:
+        1: Labels do not match the questions.
+        3: About half the labels match.
+        5: Every label matches the cognitive demand.
+    - id: difficulty
+      description: Difficulty suits the course year.
+      scale: [1, 5]
+      anchors:
+        1: Far too easy or far too hard for the year.
+        3: Acceptable but uneven.
+        5: Well pitched for the year throughout.
+
+judge:                         # Lane 4b
+  enabled: true
+  provider: mock               # e.g. provider: anthropic, model: claude-sonnet-4-5 (keep it independent of candidates)
+  model: judge
+  recheck_fraction: 0.25
+  consistency_tolerance: 1
+  include_reference: false
+
+human:                         # Lane 4c: two-tier human evaluation
+  junior: { raters_per_item: 2, sample_fraction: 0.25, include_flagged: true, min_per_stratum: 1 }
+  senior: { adjudicate: disagreements, disagreement_threshold: 2 }
+  agreement_threshold: 0.6
+
+calibration:                   # Layer 5
+  judge_human_threshold: 0.6
+  metric_human_threshold: 0.3
+  min_items: 8
+
+aggregation:                   # Layer 6
+  weights:
+    bloom_target_match: 0.10
+    grounding: 0.05
+    distinctness: 0.05
+    relevance: 0.20
+    clarity: 0.15
+    answerability: 0.20
+    bloom_alignment: 0.15
+    difficulty: 0.10
+  min_meaningful_gap: 0.05
+  bootstrap_iterations: 500
+  cluster_by: source
+  weight_perturbation: 0.1
+
+pricing:                       # USD per 1M tokens (edit to current prices)
+  "openai:gpt-4o-mini": { input: 0.15, output: 0.60 }

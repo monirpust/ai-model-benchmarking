@@ -1,0 +1,21 @@
+{
+  "name": "genbench",
+  "version": "1.0.0",
+  "description": "Configuration-driven AI benchmarking framework with LLM pre-filtering, LLM judges and two-tier human evaluation",
+  "main": "src/index.js",
+  "bin": { "genbench": "bin/genbench.js" },
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js",
+    "test": "node --test test/*.test.js",
+    "demo:qg": "node bin/genbench.js run examples/question-generation/config.yaml --simulate-humans",
+    "demo:grading": "node bin/genbench.js run examples/ai-grading/config.yaml --simulate-humans"
+  },
+  "engines": { "node": ">=18.17" },
+  "keywords": ["benchmark", "llm", "evaluation", "llm-as-a-judge", "human-evaluation", "education"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0"
+  }
+}

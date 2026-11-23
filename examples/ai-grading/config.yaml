@@ -1,0 +1,214 @@
+# GenBench use case 2: AI grading of short written answers (with optional image / audio answers)
+
+benchmark:
+  id: ai-grading
+  name: AI grading of student short answers
+  version: 1.0.0
+  decision: >-
+    Which model configuration can assist teachers by proposing marks and feedback for
+    10-mark short-answer questions, close enough to teacher marks to be used as a first pass?
+  audience: Course teachers and the exam committee
+  owner: MSIB Research Group
+
+task:
+  description: >-
+    Given an exam question, a marking rubric and a student's answer (text, optionally a photo of
+    a handwritten diagram or an audio recording of an oral answer), assign an integer mark from
+    0 to 10 following the rubric, and write specific, actionable feedback. Output English JSON.
+
+inputs:
+  fields:
+    - { name: question, type: text }
+    - { name: rubric, type: text }
+    - { name: student_answer, type: text }
+    - { name: answer_image, type: image, optional: true }
+    - { name: oral_answer, type: audio, optional: true }
+  dataset: data/items.jsonl
+  strata: [subject, answer_length]
+  min_per_stratum: 2
+  split: { by: source, test_fraction: 1.0, seed: 3 }   # all questions are test; tune prompts on your own dev set
+
+output:
+  instructions: Return only a JSON object with score, feedback, strengths and improvements.
+  schema:
+    type: object
+    required: [score, feedback]
+    properties:
+      score: { type: integer, minimum: 0, maximum: 10 }
+      feedback: { type: string, minLength: 20 }
+      strengths: { type: array, maxItems: 3, items: { type: string } }
+      improvements: { type: array, maxItems: 3, items: { type: string } }
+
+space:
+  factors:
+    model:
+      levels:
+        - { id: "mock:strong", supports: [text, image, audio], tier: frontier }
+        - { id: "mock:medium", supports: [text, image, audio], tier: mid }
+        - { id: "mock:weak", supports: [text, image, audio], tier: small }
+        - { id: "openai:gpt-4o-mini", supports: [text, image], tier: small }
+        - { id: "openai:gpt-4.1", supports: [text, image], tier: frontier }
+        - { id: "anthropic:claude-sonnet-4-5", supports: [text, image], tier: frontier }
+        - { id: "anthropic:claude-haiku-4-5", supports: [text, image], tier: small }
+        - { id: "gemini:gemini-2.5-flash", supports: [text, image, audio], tier: small }
+        - { id: "gemini:gemini-2.5-pro", supports: [text, image, audio], tier: frontier }
+        - { id: "compat:llama3.1", supports: [text], tier: small }
+    prompt:
+      levels:
+        - { id: zero_shot, description: bare instruction }
+        - { id: rubric_anchored, description: rubric points mapped to marks, recommended for rubric based grading }
+        - { id: cot_then_score, description: reason about each rubric point then score }
+        - { id: few_shot_graded, description: two graded example answers }
+        - { id: two_pass_verify, description: score then re-check against rubric }
+    temperature: { levels: [0, 0.3, 0.7, 1.0] }
+    grader_persona:
+      levels:
+        - { id: examiner, text: "You are a fair, experienced university examiner." }
+        - { id: strict_marker, text: "You are a strict marker who only awards marks for explicit rubric points." }
+        - { id: supportive_tutor, text: "You are a supportive tutor giving formative feedback." }
+        - { id: none, text: "" }
+    score_calibration:
+      levels:
+        - { id: none }
+        - { id: anchor_examples, description: graded anchor answers shown, recommended }
+        - { id: reference_answer, description: model answer shown }
+    feedback_style: { levels: [brief, detailed, socratic] }
+    strictness:
+      levels:
+        - { id: lenient }
+        - { id: neutral, recommended: true, description: follow the rubric exactly }
+        - { id: strict }
+    max_tokens: { levels: [512, 1024, 2048] }
+    input_mode: { levels: [multimodal, text_only] }
+    language:
+      levels:
+        - { id: english }
+        - { id: bangla }
+    reasoning: { levels: [off, brief] }
+    rubric_visibility: { levels: [show_rubric, hide_rubric] }
+  constraints:
+    - { if: { model: "compat:*" }, then_not: { input_mode: multimodal } }
+    - { if: { prompt: rubric_anchored }, then_not: { rubric_visibility: hide_rubric } }
+  prefilter:
+    enabled: true
+    provider: mock
+    model: planner
+    target_size: 10
+    require_available_providers: true
+    guidance: >-
+      Grading must follow the rubric, so the rubric must be shown. English feedback only.
+      Low temperature for scoring consistency. Keep one cheap model as a baseline.
+
+prompts:
+  system: "{{factors.grader_persona}}"
+  zero_shot: |
+    Mark this answer out of 10.
+    QUESTION: {{question}}
+    STUDENT ANSWER: {{student_answer}}
+    Schema: {{output_schema}}
+  rubric_anchored: |
+    Mark the student answer out of 10 using ONLY the rubric. Award marks per rubric point,
+    sum them, and explain in feedback which points were earned or missed. Strictness: {{factors.strictness}}.
+    QUESTION: {{question}}
+    RUBRIC: {{rubric}}
+    STUDENT ANSWER: {{student_answer}}
+    {{output_instructions}}
+    Schema: {{output_schema}}
+  cot_then_score: |
+    For each rubric point decide whether the answer earns it, then give the total out of 10.
+    Put only the final mark and feedback in the JSON.
+    QUESTION: {{question}}
+    RUBRIC: {{rubric}}
+    STUDENT ANSWER: {{student_answer}}
+    Schema: {{output_schema}}
+  few_shot_graded: |
+    Example: a complete answer covering every rubric point scores 10; an answer with a key
+    misconception scores 0-2. Feedback style: {{factors.feedback_style}}.
+    QUESTION: {{question}}
+    RUBRIC: {{rubric}}
+    STUDENT ANSWER: {{student_answer}}
+    Schema: {{output_schema}}
+  two_pass_verify: |
+    Score the answer against the rubric, then re-read the rubric and correct your score if needed.
+    QUESTION: {{question}}
+    RUBRIC: {{rubric}}
+    STUDENT ANSWER: {{student_answer}}
+    Schema: {{output_schema}}
+
+run:
+  repeats: 3          # grading consistency across runs matters
+  seed: 11
+  max_concurrency: 6
+  retry_invalid: 1
+
+metrics:
+  - { id: schema_valid, type: schema_valid }
+  - { id: mark_qwk, type: qwk, path: score, reference: score, scale: [0, 10] }
+  - { id: within_one_mark, type: within_tolerance, path: score, reference: score, tolerance: 1 }
+  - { id: abs_error, type: numeric_error, path: score, reference: score, scale: [0, 10] }
+  - { id: feedback_length_ok, type: length, path: feedback, range: [15, 150] }
+  - { id: feedback_grounding, type: grounding, path: feedback, against: [student_answer, rubric] }
+
+rubric:            # judges and humans rate the FEEDBACK quality; marks are checked against the teacher key
+  criteria:
+    - id: specificity
+      description: Feedback refers to specific content of this student's answer and the rubric points.
+      scale: [1, 5]
+      anchors:
+        1: Generic praise or criticism that fits any answer.
+        3: Mentions the topic but not which rubric points were met or missed.
+        5: { description: Names exactly which rubric points were earned and missed, example: "You explained degeneration with sorted keys but did not mention rotations." }
+    - id: correctness
+      description: Feedback statements are technically correct and consistent with the mark.
+      scale: [1, 5]
+      anchors:
+        1: Contains technical errors or contradicts the mark.
+        3: Mostly correct, minor inaccuracies.
+        5: Fully correct and consistent with the mark.
+    - id: actionability
+      description: The student can act on the feedback to improve.
+      scale: [1, 5]
+      anchors:
+        1: No guidance on how to improve.
+        3: Vague guidance ("add more detail").
+        5: Concrete next steps tied to missing points.
+    - id: tone
+      description: Respectful, encouraging and professional.
+      scale: [1, 5]
+      anchors:
+        1: Dismissive or harsh.
+        3: Neutral.
+        5: Encouraging and professional.
+
+judge:
+  enabled: true
+  provider: mock
+  model: judge
+  recheck_fraction: 0.25
+  consistency_tolerance: 1
+  include_reference: true      # the judge sees the teacher mark when judging feedback correctness
+
+human:
+  junior: { raters_per_item: 2, sample_fraction: 0.2, include_flagged: true, min_per_stratum: 1 }
+  senior: { adjudicate: disagreements, disagreement_threshold: 2 }
+  agreement_threshold: 0.6
+  show_reference: true
+
+calibration:
+  judge_human_threshold: 0.6
+  metric_human_threshold: 0.3
+  min_items: 8
+
+aggregation:
+  weights:
+    mark_qwk: 0.30
+    within_one_mark: 0.15
+    abs_error: 0.10
+    specificity: 0.15
+    correctness: 0.15
+    actionability: 0.10
+    tone: 0.05
+  min_meaningful_gap: 0.05
+  bootstrap_iterations: 500
+  cluster_by: source          # answers to the same question are correlated: resample whole questions
+  weight_perturbation: 0.1
